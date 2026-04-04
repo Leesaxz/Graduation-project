@@ -2,34 +2,34 @@
 #include "Delay.h"
 #include "OLED.h"
 #include "Motor.h"
-#include "Flame.h"
-#include "Pump.h"
-#include "DS18B20.h"
-#include "Buzzer.h"
 #include "HCSR04.h"
-#include "IRSensor.h"
-#include "LED.h"
 #include "Timer.h"   
 #include "Encoder.h" 
-#include "PWM_SG90.h" // 🚨 终于把你加进来了！
+#include "PWM_SG90.h" 
 
-// ================= 状态机定义 =================//测试
+// 暂时屏蔽不需要的模块，让系统极度干净
+// #include "Flame.h"
+// #include "Pump.h"
+// #include "DS18B20.h"
+// #include "Buzzer.h"
+// #include "IRSensor.h"
+// #include "LED.h"
+
+// ================= 精简版：纯雷达巡航状态机 =================
 typedef enum {
-    STATE_PATROL = 0,   // 巡逻寻迹
-    STATE_OBSTACLE,     // 雷达避障扫描
-    STATE_AIM_FIRE,     // 瞄准火源
-    STATE_EXTINGUISH    // 喷水灭火
+    STATE_CRUISE = 0,   // 直线巡航
+    STATE_SCAN,         // 停车，启动摇头雷达扫描
+    STATE_TURN          // 执行避障转向动作
 } SystemState_t;
 
-SystemState_t CarState = STATE_PATROL; 
+SystemState_t CarState = STATE_CRUISE; 
 
-// ================= 全局传感器数据 =================
-float Global_Temp = 0.0;     
+// ================= 全局变量 =================
 uint16_t Global_Dist = 0;    
-uint8_t Global_Fire = 0;     
 
-// ================= 👑 PID 控制参数 =================
-float Kp = 8.0, Ki = 0.5, Kd = 1.0; 
+// ================= 👑 温和版 PID 控制参数 =================
+// Kp 调小到了 4.0，防止轮子抽搐打滑
+float Kp = 4.0, Ki = 0.5, Kd = 1.0; 
 int16_t Target_Speed_L = 0, Target_Speed_R = 0; 
 
 int16_t Err_L = 0, LastErr_L = 0, SumErr_L = 0, PWM_L = 0;
@@ -41,168 +41,115 @@ int16_t Limit_PWM(int16_t pwm) {
     return pwm;
 }
 
-// ================= 辅助功能 =================
-void Alarm_Effect(uint8_t State) {
-    // 🔇 蜂鸣器暂时毒哑，安心调试。需要响的时候解开注释！
-    // if (State) { Buzzer_ON(); LED2_ON(); } 
-    // else { Buzzer_OFF(); LED2_OFF(); }
-}
-
 int main(void)
 {
-    // 1. 硬件外设大点兵
+    // 1. 硬件初始化 (只初始化巡航需要的模块)
     OLED_Init();
     Motor_Init();
-    Flame_Init();
-    Pump_Init();
-    DS18B20_Init();    
     HCSR04_Init();
-    IRSensor_Init();
-    LED_Init();       
     Encoder_Init(); 
-    Timer_Init();
-	Buzzer_Init();
-    
-    // 🚨 唤醒舵机！
     PWM_SG90_Init();
-    Servo_SetAngle(90.0); // 上电立刻转到正前方！
+    Timer_Init();   // SysTick 心跳
+    
+    // 初始化时让舵机回正，只发一次指令！
+    Servo_SetAngle(90.0); 
 
-    OLED_ShowString(1, 1, "RADAR SYS OK...");
-    LED1_ON();        
+    OLED_ShowString(1, 1, "RADAR CRUISE..");
     Delay_ms(1500);
     OLED_Clear();
 
-    // 2. 状态机主循环
+    // 2. 主循环
     while(1)
     {
-        // ================= [10ms 控制层] =================
+        // ================= [10ms 动作控制层] =================
         if (Flag_10ms == 1)
         {
             Flag_10ms = 0;
             
-            Global_Fire = Flame_GetPosition(); 
-            
-            // 雷达扫描子状态机专属变量
-            static uint8_t  Avoid_SubState = 0; 
-            static uint16_t Avoid_Timer = 0;    
+            // 静态变量，用于管理复杂的雷达扫描动作
+            static uint8_t  Scan_Step = 0; 
+            static uint16_t Action_Timer = 0;    
             static uint16_t Dist_Left = 0;      
             static uint16_t Dist_Right = 0;     
             
-            // ================= 🧠 【决策层】状态转移 =================
-            if (Global_Fire > 0) 
+            // 🧠 【状态转移触发器】
+            if (CarState == STATE_CRUISE) 
             {
-                if (Global_Fire == 3) CarState = STATE_EXTINGUISH;
-                else CarState = STATE_AIM_FIRE;
-            } 
-            // 触发条件：正前方距离小于 15cm，启动避障！
-            else if (Global_Dist > 0 && Global_Dist < 15 && CarState != STATE_OBSTACLE) 
-            {
-                CarState = STATE_OBSTACLE; 
-                Avoid_SubState = 1; // 启动雷达扫描序列
-                Avoid_Timer = 0;    
-            } 
-            // 避障退出逻辑
-            else if (CarState == STATE_OBSTACLE) 
-            {
-                if (Avoid_SubState == 0) {
-                    CarState = STATE_PATROL; // 避障全套动作打完，恢复巡逻
+                // 如果在直行时，前方距离小于 20cm，立刻刹车并开始扫描
+                if (Global_Dist > 0 && Global_Dist < 20) {
+                    CarState = STATE_SCAN;
+                    Scan_Step = 1; // 启动扫描第一步
                 }
             }
-            else 
-            {
-                CarState = STATE_PATROL;   
-            }
 
-            // ================= ⚔️ 【战术层】执行动作 =================
+            // ⚔️ 【战术执行层】
             switch (CarState)
             {
-                case STATE_EXTINGUISH:
-                    Target_Speed_L = 0; Target_Speed_R = 0; 
-                    Servo_SetAngle(90.0); // 灭火时必须盯住前方
-                    Pump_Open();      
-                    Alarm_Effect(1);
+                case STATE_CRUISE:
+                    // 匀速直行巡航 (15 比较慢，适合测试)
+                    Target_Speed_L = 15; 
+                    Target_Speed_R = 15; 
                     break;
                     
-                case STATE_AIM_FIRE:
-                    Pump_Close();
-                    Alarm_Effect(0);
-                    Servo_SetAngle(90.0);
-                    if (Global_Fire < 3) { Target_Speed_L = -15; Target_Speed_R = 15; } 
-                    else                 { Target_Speed_L = 15; Target_Speed_R = -15; } 
-                    break;
+                case STATE_SCAN:
+                    Target_Speed_L = 0; // 停车
+                    Target_Speed_R = 0; 
                     
-                // 🛸 核心：雷达扫描避障逻辑
-                case STATE_OBSTACLE:
-                    Pump_Close();
-                    Alarm_Effect(0);
-                    
-                    if (Avoid_SubState == 1) {
-                        Target_Speed_L = 0; Target_Speed_R = 0; // 刹车停住
-                        Servo_SetAngle(160.0);                  // 扭头看左边
-                        Avoid_Timer = 40;                       // 等待 400ms
-                        Avoid_SubState = 2;                     
+                    // 采用“步进式”扫描，彻底解决舵机发抖问题！
+                    if (Scan_Step == 1) {
+                        Servo_SetAngle(160.0);       // 指令只发一次：看左边
+                        Action_Timer = 40;           // 等待 400ms 让物理舵机转到位
+                        Scan_Step = 2;               // 步进到下一状态
                     } 
-                    else if (Avoid_SubState == 2) {
-                        if (Avoid_Timer > 0) Avoid_Timer--;     
+                    else if (Scan_Step == 2) {
+                        if (Action_Timer > 0) Action_Timer--;
                         else {
-                            Dist_Left = Global_Dist;            // 记录左边有多宽敞
-                            Servo_SetAngle(20.0);               // 扭头看右边
-                            Avoid_Timer = 40;                   // 等待 400ms
-                            Avoid_SubState = 3;
+                            Dist_Left = Global_Dist; // 读取左边距离
+                            Servo_SetAngle(20.0);    // 指令只发一次：看右边
+                            Action_Timer = 40;       
+                            Scan_Step = 3;
                         }
                     }
-                    else if (Avoid_SubState == 3) {
-                        if (Avoid_Timer > 0) Avoid_Timer--;
+                    else if (Scan_Step == 3) {
+                        if (Action_Timer > 0) Action_Timer--;
                         else {
-                            Dist_Right = Global_Dist;           // 记录右边有多宽敞
-                            Servo_SetAngle(90.0);               // 雷达回正
-                            Avoid_Timer = 30;                   // 等待 300ms
-                            Avoid_SubState = 4;
+                            Dist_Right = Global_Dist; // 读取右边距离
+                            Servo_SetAngle(90.0);     // 指令只发一次：回正
+                            Action_Timer = 30;        // 等待 300ms 回正
+                            Scan_Step = 4;
                         }
                     }
-                    else if (Avoid_SubState == 4) {
-                        if (Avoid_Timer > 0) Avoid_Timer--;
+                    else if (Scan_Step == 4) {
+                        if (Action_Timer > 0) Action_Timer--;
                         else {
-                            // 聪明的大脑开始分析两边的数据
+                            // 大脑根据刚才侦察的距离做决策！
+                            CarState = STATE_TURN;    // 准备转向
+                            Action_Timer = 50;        // 预设转向动作持续 500ms
+                            
                             if (Dist_Left > Dist_Right && Dist_Left > 15) {
-                                Target_Speed_L = -20; Target_Speed_R = 20;  // 左边宽，向左转
+                                Target_Speed_L = -15; Target_Speed_R = 15;  // 向左转
                             } else if (Dist_Right >= Dist_Left && Dist_Right > 15) {
-                                Target_Speed_L = 20; Target_Speed_R = -20;  // 右边宽，向右转
+                                Target_Speed_L = 15; Target_Speed_R = -15;  // 向右转
                             } else {
-                                Target_Speed_L = -15; Target_Speed_R = -15; // 两边都是墙，倒车！
+                                Target_Speed_L = -15; Target_Speed_R = -15; // 死胡同，倒车
+                                Action_Timer = 80; // 倒车多倒一会 (800ms)
                             }
-                            Avoid_Timer = 50; // 转向动作执行 500ms
-                            Avoid_SubState = 5;
-                        }
-                    }
-                    else if (Avoid_SubState == 5) {
-                        if (Avoid_Timer > 0) Avoid_Timer--;
-                        else {
-                            Target_Speed_L = 0; Target_Speed_R = 0; // 转向结束，踩刹车
-                            Avoid_SubState = 0;                     // 标志着避障序列彻底完成！
                         }
                     }
                     break;
                     
-                case STATE_PATROL:
-                    Pump_Close();
-                    Alarm_Effect(0);
-                    Servo_SetAngle(90.0); // 巡逻时雷达死死盯住正前方防撞
-                    
-                    uint8_t IR_L = IRSensor_GetLeft();
-                    uint8_t IR_R = IRSensor_GetRight();
-                    
-                    if (IR_L == 0 && IR_R == 1) {
-                        Target_Speed_L = -5; Target_Speed_R = 25; // 左偏，向左纠正
-                    } else if (IR_L == 1 && IR_R == 0) {
-                        Target_Speed_L = 25; Target_Speed_R = -5; // 右偏，向右纠正
+                case STATE_TURN:
+                    // 正在执行转向或倒车动作...
+                    if (Action_Timer > 0) {
+                        Action_Timer--;
                     } else {
-                        Target_Speed_L = 20; Target_Speed_R = 20; // 居中直行
+                        // 转向时间到，动作完成，恢复直行巡航！
+                        CarState = STATE_CRUISE;
                     }
                     break;
             }
 
-            // ================= ⚙️ 【执行层】PID 运算 =================
+            // ⚙️ 【PID 底层稳速闭环】(保持不变)
             int16_t Actual_Speed_L = Encoder_GetLeftSpeed();
             int16_t Actual_Speed_R = Encoder_GetRightSpeed();
             
@@ -223,23 +170,20 @@ int main(void)
             Motor_SetSpeed(Limit_PWM(PWM_L), Limit_PWM(PWM_R));
         }
         
-        // ================= [100ms 刷新层] =================
+        // ================= [100ms UI 刷新层] =================
         if (Flag_100ms == 1)
         {
             Flag_100ms = 0;
-            Global_Dist = HCSR04_GetDistance(); 
+            Global_Dist = HCSR04_GetDistance(); // 采集超声波雷达数据
             
-            if(CarState == STATE_PATROL)         OLED_ShowString(1, 1, "Mode: PATROL    ");
-            else if(CarState == STATE_OBSTACLE)  OLED_ShowString(1, 1, "Mode: SCANNING..");
-            else if(CarState == STATE_AIM_FIRE)  OLED_ShowString(1, 1, "Mode: AIMING... ");
-            else if(CarState == STATE_EXTINGUISH)OLED_ShowString(1, 1, "Mode: FIRE PUT! ");
+            // 显示当前小车的“内心情感状态”
+            if(CarState == STATE_CRUISE)      OLED_ShowString(1, 1, "Mode: CRUISE    ");
+            else if(CarState == STATE_SCAN)   OLED_ShowString(1, 1, "Mode: SCANNING  ");
+            else if(CarState == STATE_TURN)   OLED_ShowString(1, 1, "Mode: TURNING   ");
             
             OLED_ShowString(2, 1, "Dist:"); OLED_ShowNum(2, 6, Global_Dist, 3); OLED_ShowString(2, 9, "cm  ");
             OLED_ShowString(3, 1, "L:"); OLED_ShowNum(3, 3, Target_Speed_L, 3);
             OLED_ShowString(3, 8, "R:"); OLED_ShowNum(3, 10, Target_Speed_R, 3);
         }
-        
-        // ================= [2000ms 慢速层] =================
-        if (Flag_2000ms == 1) { Flag_2000ms = 0; }
     }
 }
