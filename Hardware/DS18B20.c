@@ -87,38 +87,35 @@ uint8_t DS18B20_ReadByte(void)
     return Byte;
 }
 
+// ================= 将原来的 DS18B20_GetTemp 替换为以下两个函数 =================
+
 /**
-  * @brief  获取真实温度值
-  * @retval 浮点型温度值 (例如 26.5)
+  * @brief  第一步：发送温度转换命令 (不等待)
   */
-float DS18B20_GetTemp(void)
+void DS18B20_ConvertT(void)
+{
+    DS18B20_Reset();
+    DS18B20_WriteByte(0xCC); // Skip ROM
+    DS18B20_WriteByte(0x44); // Convert T
+}
+
+/**
+  * @brief  第二步：读取已经转换好的温度
+  */
+float DS18B20_ReadT(void)
 {
     uint8_t LSB, MSB;
     int16_t temp_raw;
     float temp_real;
     
-    // 1. 发送温度转换命令
-    DS18B20_Reset();
-    DS18B20_WriteByte(0xCC); // Skip ROM (跳过 ROM 指令，因为总线上只有一个传感器)
-    DS18B20_WriteByte(0x44); // Convert T (发送温度转换指令)
-    
-    // 极其关键的等待：DS18B20 转换温度最高需要 750ms！
-    // 如果不延时直接读，读出来的永远是上一次的旧数据，或者是 85.0
-    Delay_ms(750); 
-    
-    // 2. 发送读取数据命令
     DS18B20_Reset();
     DS18B20_WriteByte(0xCC); // Skip ROM
-    DS18B20_WriteByte(0xBE); // Read Scratchpad (读暂存器)
+    DS18B20_WriteByte(0xBE); // Read Scratchpad
     
-    // 3. 读取温度低 8 位和高 8 位
-    LSB = DS18B20_ReadByte(); // 低位先出
-    MSB = DS18B20_ReadByte(); // 高位后出
+    LSB = DS18B20_ReadByte(); // 低位
+    MSB = DS18B20_ReadByte(); // 高位
     
-    // 4. 合并为 16 位有符号整数
     temp_raw = (MSB << 8) | LSB;
-    
-    // 5. 精度计算：DS18B20 的 12 位分辨率下，每个数字单位代表 0.0625 摄氏度
     temp_real = temp_raw * 0.0625;
     
     return temp_real;

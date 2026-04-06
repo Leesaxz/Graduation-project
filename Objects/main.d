@@ -34,3 +34,8 @@
 .\objects\main.o: .\Hardware\LED.h
 .\objects\main.o: .\Hardware\HCSR04.h
 .\objects\main.o: .\Hardware\PWM_SG90.h
+.\objects\main.o: .\Hardware\Flame.h
+.\objects\main.o: .\Hardware\Pump.h
+.\objects\main.o: .\Hardware\Buzzer.h
+.\objects\main.o: .\Hardware\DS18B20.h
+.\objects\main.o: .\Hardware\IRSensor.h

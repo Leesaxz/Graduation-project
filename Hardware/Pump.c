@@ -29,4 +29,5 @@ void Pump_Close(void)
 	if( Pump_State == 0 ) return ;
 	GPIO_ResetBits(GPIOC, GPIO_Pin_13);
 	Delay_ms(1500);
+	Pump_State = 0;
 }
