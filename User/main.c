@@ -11,9 +11,6 @@
 #include "DS18B20.h"
 #include "IRSensor.h" 
 
-// ==========================================
-// 🚨 避障距离阈值优化
-// ==========================================
 #define DIST_SAFE  45  
 #define DIST_WARN  30  
 
@@ -22,9 +19,6 @@
 
 uint8_t Current_State = STATE_PATROL;
 
-// ==========================================
-// 🚀 电机平滑加减速控制
-// ==========================================
 int16_t Cur_Speed_L = 0; 
 int16_t Cur_Speed_R = 0; 
 
@@ -94,9 +88,8 @@ int main(void)
     while (1)
     {
         // --------------------------------------------------
-        // 【最高优先级全局任务】异步测量火场温度
+        // 异步测量火场温度
         // --------------------------------------------------
-        // 不管是巡逻还是灭火，都雷打不动地执行测温！
         if (temp_state == 0) 
         {
             DS18B20_ConvertT(); 
@@ -106,10 +99,6 @@ int main(void)
         else if (temp_timer >= 800) 
         {
             float temp = DS18B20_ReadT(); 
-            
-            // 顶着水泵的干扰强行滤噪更新：
-            // 如果水泵造成了一次误码(如85.0)，这里直接无视，屏幕保持上一秒的高温
-            // 直到下个 800ms 读出正确数据再刷新，保证监控不中断！
             if (temp > 5.0 && temp < 80.0 && temp != 85.0) 
             {
                 int temp_int = (int)temp;                  
@@ -120,12 +109,11 @@ int main(void)
                 OLED_ShowNum(3, 10, temp_frac, 1);
                 OLED_ShowString(3, 11, " C"); 
             }
-            
             temp_state = 0; 
         }
 
         // --------------------------------------------------
-        // 全局感知：火灾检测
+        // 火灾检测
         // --------------------------------------------------
         uint8_t fire_pos = Flame_GetPosition(); 
         
@@ -174,16 +162,11 @@ int main(void)
             OLED_ShowString(2, 1, "Dist:     cm");
             OLED_ShowNum(2, 7, dist_front, 3); 
             
-            if (dist_front > DIST_SAFE && ir_left == 0 && ir_right == 0) 
-            {
+            if (dist_front > DIST_SAFE && ir_left == 0 && ir_right == 0) {
                 Motor_SmoothSpeed(500, 500); 
-            }
-            else if (dist_front > DIST_WARN && dist_front <= DIST_SAFE && ir_left == 0 && ir_right == 0) 
-            {
+            } else if (dist_front > DIST_WARN && dist_front <= DIST_SAFE && ir_left == 0 && ir_right == 0) {
                 Motor_SmoothSpeed(300, 300); 
-            }
-            else 
-            {
+            } else {
                 Motor_SmoothSpeed(0, 0);    
                 Delay_ms(200); 
                 
@@ -220,7 +203,6 @@ int main(void)
                     Delay_ms(350);               
                 }
                 
-                // 补偿避障耗时
                 temp_timer += 2150; 
             }
         }
@@ -234,33 +216,31 @@ int main(void)
             OLED_ShowString(2, 1, "Pos:  Exting...");
             OLED_ShowNum(2, 6, last_fire_pos, 1); 
             
+            // 🌟 防过冲调校：大幅降低了 fire_pos 为 2 和 4 时的微调转速
             if (fire_pos == 1) {
-                Motor_SmoothSpeed(-500, 500); 
+                Motor_SmoothSpeed(-350, 300);  // 极左大转
                 Pump_Close(); 
             } else if (fire_pos == 2) {
-                Motor_SmoothSpeed(-300, 300); 
+                Motor_SmoothSpeed(-250, 200);  // 🌟 偏左小微调，动作更轻柔
                 Pump_Close(); 
             } else if (fire_pos == 5) {
-                Motor_SmoothSpeed(500, -500); 
+                Motor_SmoothSpeed(350, -300);  // 极右大转
                 Pump_Close();
             } else if (fire_pos == 4) {
-                Motor_SmoothSpeed(300, -300); 
+                Motor_SmoothSpeed(250, -200);  // 🌟 偏右小微调，动作更轻柔
                 Pump_Close();
             } else if (fire_pos == 3) {
-                Motor_SmoothSpeed(0, 0); 
+                Motor_SmoothSpeed(0, 0);       // 正中锁定，停车喷水
                 Pump_Open();             
             } else if (fire_pos == 0) {
                 Motor_SmoothSpeed(0, 0); 
             }
             
             Delay_ms(50); 
-            // 🌟 核心补偿：灭火状态微调耗时 50ms，必须加给温度计时器！
             temp_timer += 50; 
         }
         
-        // 主循环心跳延时
         Delay_ms(20); 
-        // 基础时间补偿
         temp_timer += 20; 
     }
 }
