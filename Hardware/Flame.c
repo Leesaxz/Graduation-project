@@ -39,7 +39,7 @@ uint8_t Flame_GetPosition(void)
     if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_2) == Bit_SET) return 1;
     if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_3) == Bit_SET) return 2;
     if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_11) == Bit_SET) return 3;
-    if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_12) == Bit_SET) return 4;
+    //if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_12) == Bit_SET) return 4;
     if (GPIO_ReadInputDataBit(GPIOB, GPIO_Pin_15) == Bit_SET) return 5;
     
     return 0; 

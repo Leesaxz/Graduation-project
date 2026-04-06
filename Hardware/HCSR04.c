@@ -1,96 +1,85 @@
-#include "stm32f10x.h"                  
-#include "Delay.h"                      
+#include "stm32f10x.h"
+#include "Delay.h"
 
-// 初始化保持不变
 void HCSR04_Init(void)
 {
+    // 1. 开启 GPIO 时钟 (PB8, PB9)
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
+    
+    // 🛡️ 开启 TIM4 时钟 (挂载在 APB1 上)
+    // 完美避开舵机的 TIM1，互不干扰！
+    RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM4, ENABLE);
+    
     GPIO_InitTypeDef GPIO_InitStructure;
     
-    // PB8 (Trig 触发)
+    // PB8 (Trig 触发引脚)
     GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
     GPIO_InitStructure.GPIO_Pin = GPIO_Pin_8;
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
     GPIO_Init(GPIOB, &GPIO_InitStructure);
     
-    // PB9 (Echo 接收)
+    // PB9 (Echo 接收引脚)
     GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPD; 
     GPIO_InitStructure.GPIO_Pin = GPIO_Pin_9;
     GPIO_Init(GPIOB, &GPIO_InitStructure);
     
     GPIO_ResetBits(GPIOB, GPIO_Pin_8);
+    
+    // 🛡️ 配置 TIM4 为 1us 计一次数的硬件秒表
+    TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStructure;
+    TIM_TimeBaseInitStructure.TIM_ClockDivision = TIM_CKD_DIV1;
+    TIM_TimeBaseInitStructure.TIM_CounterMode = TIM_CounterMode_Up;
+    TIM_TimeBaseInitStructure.TIM_Period = 65535;     
+    TIM_TimeBaseInitStructure.TIM_Prescaler = 72 - 1; // 72MHz / 72 = 1MHz (1us)
+    TIM_TimeBaseInit(TIM4, &TIM_TimeBaseInitStructure);
+    
+    TIM_Cmd(TIM4, DISABLE); // 初始化后先关掉秒表
 }
 
 /**
-  * @brief  获取一次原始距离 (内部函数)
+  * @brief  获取超声波距离 (TIM4 硬件高精度无干扰版)
   */
-uint16_t HCSR04_GetRawDistance(void)
+uint16_t HCSR04_GetDistance(void)
 {
-    uint32_t Time = 0;
-    uint32_t Timeout = 0;
+    uint16_t Timeout = 0;
     
-    // 1. 发送触发脉冲
+    // 1. 发送 15us 触发信号
     GPIO_SetBits(GPIOB, GPIO_Pin_8);
     Delay_us(15); 
     GPIO_ResetBits(GPIOB, GPIO_Pin_8);
     
-    // 2. 等待高电平出现
+    // 2. 等待 Echo 拉高 (回波开始)
+    Timeout = 0;
     while(GPIO_ReadInputDataBit(GPIOB, GPIO_Pin_9) == Bit_RESET)
     {
         Timeout++;
         Delay_us(1);
-        if(Timeout > 100000) return 999; 
+        if(Timeout > 10000) return 999; // 10ms 没反应认为前方空旷
     }
     
-    // 3. 记录高电平持续时间 (移除 Delay_us(1)，让循环极其紧凑！)
-    Time = 0;
+    // 3. 🎯 回波来了！立刻清零并启动 TIM4 硬件秒表！
+    TIM_SetCounter(TIM4, 0);
+    TIM_Cmd(TIM4, ENABLE);
+    
+    // 4. 等待 Echo 拉低 (回波结束)
     while(GPIO_ReadInputDataBit(GPIOB, GPIO_Pin_9) == Bit_SET)
     {
-        Time++;         
-        // 🚨 删掉了 Delay_us(1)，只做纯加法！这样循环执行时间固定，方便后续校准！
-        if(Time > 100000) return 999; 
-    }
-    
-    // 4. 重点校准系数！
-    // 因为去掉了 Delay_us，这里的 Time 并不是微秒，而是循环次数。
-    // 经过测试，在 STM32 72MHz 且没有 Delay_us 时，大概循环 1 次是 0.1~0.2us。
-    // 👉 初始建议值设为 0.0035，具体要拿尺子量！
-    float Distance = Time * 0.0035; 
-    
-    if(Distance > 999) return 999;
-    return (uint16_t)Distance;
-}
-
-/**
-  * @brief  🏆 对外提供的接口：带中值滤波的超声波测距
-  * @retval 极其稳定的距离值 (cm)
-  */
-uint16_t HCSR04_GetDistance(void)
-{
-    uint16_t dis[5] = {0}; // 采 5 个样本
-    uint16_t temp = 0;
-    
-    // 1. 连续测量 5 次
-    for(uint8_t i = 0; i < 5; i++)
-    {
-        dis[i] = HCSR04_GetRawDistance();
-        Delay_ms(5); // 🚨 极度重要！每次测量之间必须延时，等待上一次超声波余音消失！
-    }
-    
-    // 2. 冒泡排序 (把 5 个数据从小到大排好队)
-    for(uint8_t i = 0; i < 4; i++)
-    {
-        for(uint8_t j = 0; j < 4 - i; j++)
+        // 🛡️ 硬件防卡死：超过 50000us (约8.5米) 强制退出
+        // 哪怕舵机瞬间大电流把超声波“劈瞎了”，最多 50ms 就会被无情踢出，绝不拖死主循环！
+        if(TIM_GetCounter(TIM4) > 50000) 
         {
-            if(dis[j] > dis[j+1])
-            {
-                temp = dis[j];
-                dis[j] = dis[j+1];
-                dis[j+1] = temp;
-            }
+            TIM_Cmd(TIM4, DISABLE);
+            return 999; 
         }
     }
     
-    // 3. 抛弃两个最大值和两个最小值，取最中间那个最靠谱的值！
-    return dis[2];
+    // 5. 🎯 回波结束，立刻按下秒表暂停键，并读取时间
+    TIM_Cmd(TIM4, DISABLE);
+    uint16_t time_us = TIM_GetCounter(TIM4);
+    
+    // 6. 标准公式计算距离
+    float Distance = time_us / 58.0; 
+    
+    if(Distance > 999) return 999;
+    return (uint16_t)Distance;
 }

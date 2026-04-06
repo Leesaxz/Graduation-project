@@ -1,4 +1,7 @@
 #include "stm32f10x.h"                  // Device header
+#include "Delay.h"
+
+uint8_t Pump_State = 0;
 
 void Pump_Init(void)
 {
@@ -12,14 +15,18 @@ void Pump_Init(void)
 	GPIO_Init(GPIOC, &GPIO_initStructure);
 	
 	GPIO_ResetBits(GPIOC, GPIO_Pin_13);
+	Pump_State = 0;
 }
 
 void Pump_Open(void)
 {
 	GPIO_SetBits(GPIOC, GPIO_Pin_13);
+	Pump_State = 1;
 }
 
 void Pump_Close(void)
-{
+{	
+	if( Pump_State == 0 ) return ;
 	GPIO_ResetBits(GPIOC, GPIO_Pin_13);
+	Delay_ms(1500);
 }

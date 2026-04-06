@@ -28,3 +28,4 @@
 .\objects\pump.o: .\Library\stm32f10x_usart.h
 .\objects\pump.o: .\Library\stm32f10x_wwdg.h
 .\objects\pump.o: .\Library\misc.h
+.\objects\pump.o: .\System\Delay.h
