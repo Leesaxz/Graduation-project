@@ -29,4 +29,3 @@
 .\objects\flame.o: .\Library\stm32f10x_wwdg.h
 .\objects\flame.o: .\Library\misc.h
 .\objects\flame.o: Hardware\Flame.h
-.\objects\flame.o: .\System\Delay.h
