@@ -13,8 +13,8 @@
 #include "ESP8266.h"   
 #include <stdio.h>     
 
-#define DIST_SAFE  30  
-#define DIST_WARN  20  
+#define DIST_SAFE  35  
+#define DIST_WARN  25  
 
 #define STATE_PATROL 0 
 #define STATE_FIRE   1 
@@ -56,7 +56,7 @@ int main(void)
 {
     OLED_Init(); Motor_Init(); LED_Init(); HCSR04_Init(); PWM_SG90_Init();
     Flame_Init(); Pump_Init(); Buzzer_Init(); DS18B20_Init(); IRSensor_Init(); 
-    ESP8266_Init(); 
+    ESP8266_Init(); // PA9(TX), PA10(RX)
     
     Servo_SetAngle(90); Buzzer_OFF(); Pump_Close();
     
@@ -74,9 +74,7 @@ int main(void)
     
     float Global_Temp = -100.0;  
     uint16_t mqtt_timer = 0;      
-    
-    // 🌟 新增：卡死挣脱计数器（防左右横跳）
-    uint8_t stuck_cnt = 0; 
+    uint8_t stuck_cnt = 0; // 卡死挣脱计数器
 
     while (1)
     {
@@ -115,15 +113,18 @@ int main(void)
         }
 
         // --------------------------------------------------
-        // MQTT 发送
+        // 🌟 极速 MQTT 发送 (频率：每秒1次，发送4个核心数据)
         // --------------------------------------------------
-        if (mqtt_timer >= 5000 && Global_Temp != -100.0) 
+        if (mqtt_timer >= 1000 && Global_Temp != -100.0) 
         {
-            char simple_msg[20];
+            char simple_msg[40];
             int t_int = (int)Global_Temp;
             int t_frac = (int)(Global_Temp * 10) % 10;
-            sprintf(simple_msg, "%d.%d\n", t_int, t_frac);
+            
+            // 格式: 温度,状态,距离,火源方位 (例如: 26.5,0,45,0)
+            sprintf(simple_msg, "%d.%d,%d,%d,%d\n", t_int, t_frac, Current_State, dist_front, last_fire_pos);
             ESP8266_SendString(simple_msg); 
+            
             mqtt_timer = 0; 
         }
 
@@ -133,8 +134,8 @@ int main(void)
         uint8_t fire_pos = Flame_GetPosition(); 
         if (fire_pos != 0) { Current_State = STATE_FIRE; fire_missing_cnt = 0; last_fire_pos = fire_pos; } 
         else {
-            if (Current_State == STATE_FIRE) { fire_missing_cnt++; if (fire_missing_cnt > 50) { Current_State = STATE_PATROL; fire_missing_cnt = 0; } } 
-            else { Current_State = STATE_PATROL; }
+            if (Current_State == STATE_FIRE) { fire_missing_cnt++; if (fire_missing_cnt > 50) { Current_State = STATE_PATROL; fire_missing_cnt = 0; last_fire_pos = 0; } } 
+            else { Current_State = STATE_PATROL; last_fire_pos = 0; }
         }
 
         // --------------------------------------------------
@@ -155,34 +156,30 @@ int main(void)
             OLED_ShowNum(2, 10, ir_left, 1);
             OLED_ShowNum(2, 14, ir_right, 1);
             
-            // 距离充裕：全速前进，清空卡死记忆！
+            // 正常巡逻
             if (dist_front > DIST_SAFE && ir_left == 0 && ir_right == 0) { 
                 Motor_SmoothSpeed(500, 500); 
-                stuck_cnt = 0; // 只要能顺利往前走，说明没卡住
+                stuck_cnt = 0; 
             } 
-            // 距离靠近：减速慢行，也算安全状态
             else if (dist_front > DIST_WARN && dist_front <= DIST_SAFE && ir_left == 0 && ir_right == 0) { 
                 Motor_SmoothSpeed(300, 300); 
                 stuck_cnt = 0;
             } 
-            // 🚨 遇到障碍物：触发避障逻辑
+            // 触发避障
             else {
                 Motor_SmoothSpeed(0, 0); Delay_ms(200); 
                 
-                stuck_cnt++; // 撞墙计数器 +1
+                stuck_cnt++; 
                 
-                // 🌟 暴躁老哥机制：如果连续3次避障都没走出去，说明在左右横跳死循环！
+                // 暴躁老哥机制：防止左右横跳
                 if (stuck_cnt >= 3) {
                     OLED_ShowString(1, 1, "Mode: ESCAPE!  ");
-                    
-                    Motor_SmoothSpeed(-400, -400); Delay_ms(600); // 1. 猛退拉开距离
-                    Motor_SmoothSpeed(500, -500); Delay_ms(800);  // 2. 原地大风车（强行转掉 180 度！）
-                    
-                    stuck_cnt = 0; // 突围成功，重置计数器
-                    
+                    Motor_SmoothSpeed(-400, -400); Delay_ms(600); 
+                    Motor_SmoothSpeed(500, -500); Delay_ms(800);  // 猛转180度掉头
+                    stuck_cnt = 0; 
                     temp_timer += 1600; mqtt_timer += 1600; 
                 } 
-                // 常规避障微操
+                // 微操避障
                 else {
                     Servo_SetAngle(45); Delay_ms(300); dist_right = Get_Filtered_Distance();
                     Servo_SetAngle(135); Delay_ms(300); dist_left = Get_Filtered_Distance();
@@ -190,11 +187,11 @@ int main(void)
                     
                     if (ir_right == 1 || dist_right <= dist_left) { 
                         Motor_SmoothSpeed(-400, -400); Delay_ms(400); 
-                        Motor_SmoothSpeed(-450, 450); Delay_ms(250);  // 微操左转
+                        Motor_SmoothSpeed(-450, 450); Delay_ms(250); 
                     } 
                     else if (ir_left == 1 || dist_right > dist_left) { 
                         Motor_SmoothSpeed(-400, -400); Delay_ms(400); 
-                        Motor_SmoothSpeed(450, -450); Delay_ms(250);  // 微操右转
+                        Motor_SmoothSpeed(450, -450); Delay_ms(250);  
                     } 
                     temp_timer += 1750; mqtt_timer += 1750; 
                 }
@@ -207,9 +204,9 @@ int main(void)
             OLED_ShowString(2, 1, "Extinguishing."); 
             
             if (fire_pos == 1) { Motor_SmoothSpeed(-450, 450); Pump_Close(); } 
-            else if (fire_pos == 2) { Motor_SmoothSpeed(-270, 200); Pump_Close(); } 
+            else if (fire_pos == 2) { Motor_SmoothSpeed(-200, 200); Pump_Close(); } 
             else if (fire_pos == 5) { Motor_SmoothSpeed(450, -450); Pump_Close(); } 
-            else if (fire_pos == 4) { Motor_SmoothSpeed(270, -200); Pump_Close(); } 
+            else if (fire_pos == 4) { Motor_SmoothSpeed(200, -200); Pump_Close(); } 
             else if (fire_pos == 3) { Motor_SmoothSpeed(0, 0); Pump_Open(); } 
             else if (fire_pos == 0) { Motor_SmoothSpeed(0, 0); }
             
