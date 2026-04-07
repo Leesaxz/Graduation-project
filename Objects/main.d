@@ -39,3 +39,5 @@
 .\objects\main.o: .\Hardware\Buzzer.h
 .\objects\main.o: .\Hardware\DS18B20.h
 .\objects\main.o: .\Hardware\IRSensor.h
+.\objects\main.o: .\Hardware\ESP8266.h
+.\objects\main.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdio.h

@@ -10,38 +10,43 @@
 #include "Buzzer.h"
 #include "DS18B20.h"
 #include "IRSensor.h" 
+#include "ESP8266.h"   
+#include <stdio.h>     
 
-#define DIST_SAFE  45  
-#define DIST_WARN  30  
+#define DIST_SAFE  30  
+#define DIST_WARN  20  
 
 #define STATE_PATROL 0 
 #define STATE_FIRE   1 
 
 uint8_t Current_State = STATE_PATROL;
 
+// ==========================================
+// 高级滤波函数：连续3次取最远值，防超声波杂波
+// ==========================================
+uint16_t Get_Filtered_Distance(void) {
+    uint16_t d1 = HCSR04_GetDistance(); if(d1 == 0) d1 = 999; Delay_ms(5);
+    uint16_t d2 = HCSR04_GetDistance(); if(d2 == 0) d2 = 999; Delay_ms(5);
+    uint16_t d3 = HCSR04_GetDistance(); if(d3 == 0) d3 = 999;
+    
+    uint16_t max = d1;
+    if (d2 > max) max = d2;
+    if (d3 > max) max = d3;
+    return max;
+}
+
+// 电机平滑控制
 int16_t Cur_Speed_L = 0; 
 int16_t Cur_Speed_R = 0; 
-
-void Motor_SmoothSpeed(int16_t target_L, int16_t target_R)
-{
+void Motor_SmoothSpeed(int16_t target_L, int16_t target_R) {
     int16_t step = 80; 
-    while(Cur_Speed_L != target_L || Cur_Speed_R != target_R)
-    {
-        if(Cur_Speed_L < target_L) {
-            Cur_Speed_L += step;
-            if(Cur_Speed_L > target_L) Cur_Speed_L = target_L; 
-        } else if(Cur_Speed_L > target_L) {
-            Cur_Speed_L -= step;
-            if(Cur_Speed_L < target_L) Cur_Speed_L = target_L; 
-        }
+    while(Cur_Speed_L != target_L || Cur_Speed_R != target_R) {
+        if(Cur_Speed_L < target_L) { Cur_Speed_L += step; if(Cur_Speed_L > target_L) Cur_Speed_L = target_L; } 
+        else if(Cur_Speed_L > target_L) { Cur_Speed_L -= step; if(Cur_Speed_L < target_L) Cur_Speed_L = target_L; }
         
-        if(Cur_Speed_R < target_R) {
-            Cur_Speed_R += step;
-            if(Cur_Speed_R > target_R) Cur_Speed_R = target_R;
-        } else if(Cur_Speed_R > target_R) {
-            Cur_Speed_R -= step;
-            if(Cur_Speed_R < target_R) Cur_Speed_R = target_R;
-        }
+        if(Cur_Speed_R < target_R) { Cur_Speed_R += step; if(Cur_Speed_R > target_R) Cur_Speed_R = target_R; } 
+        else if(Cur_Speed_R > target_R) { Cur_Speed_R -= step; if(Cur_Speed_R < target_R) Cur_Speed_R = target_R; }
+        
         Motor_SetSpeed(Cur_Speed_L, Cur_Speed_R);
         Delay_ms(5); 
     }
@@ -49,61 +54,58 @@ void Motor_SmoothSpeed(int16_t target_L, int16_t target_R)
 
 int main(void)
 {
-    OLED_Init();
-    Motor_Init();
-    LED_Init();
-    HCSR04_Init();
-    PWM_SG90_Init();
-    Flame_Init();
-    Pump_Init();
-    Buzzer_Init();
-    DS18B20_Init(); 
-    IRSensor_Init(); 
+    OLED_Init(); Motor_Init(); LED_Init(); HCSR04_Init(); PWM_SG90_Init();
+    Flame_Init(); Pump_Init(); Buzzer_Init(); DS18B20_Init(); IRSensor_Init(); 
+    ESP8266_Init(); 
     
-    Servo_SetAngle(90);
-    Buzzer_OFF();
-    Pump_Close();
+    Servo_SetAngle(90); Buzzer_OFF(); Pump_Close();
     
-    OLED_ShowString(1, 1, "System Ready...");
-    OLED_ShowString(4, 1, "Starting in 3s");
-    Delay_ms(1000);
-    OLED_ShowString(4, 1, "Starting in 2s");
-    Delay_ms(1000);
-    OLED_ShowString(4, 1, "Starting in 1s");
-    Delay_ms(1000);
+    OLED_ShowString(1, 1, "System Booting..");
+    Delay_ms(1500);
     OLED_Clear();
-    
     OLED_ShowString(3, 1, "Temp: --.- C");
     
     uint16_t dist_front = 0, dist_left = 0, dist_right = 0;
-    uint8_t  ir_left = 0;  
-    uint8_t  ir_right = 0; 
-    
+    uint8_t  ir_left = 0, ir_right = 0; 
     uint16_t fire_missing_cnt = 0; 
     uint8_t  last_fire_pos = 0;    
-    
     uint16_t temp_timer = 0; 
     uint8_t  temp_state = 0; 
+    
+    float Global_Temp = -100.0;  
+    uint16_t mqtt_timer = 0;      
+    
+    // 🌟 新增：卡死挣脱计数器（防左右横跳）
+    uint8_t stuck_cnt = 0; 
 
     while (1)
     {
         // --------------------------------------------------
-        // 异步测量火场温度
+        // 温度读取 (防0.00，平滑数字滤波)
         // --------------------------------------------------
-        if (temp_state == 0) 
-        {
+        if (temp_state == 0) {
             DS18B20_ConvertT(); 
             temp_state = 1;     
             temp_timer = 0;     
-        } 
-        else if (temp_timer >= 800) 
-        {
+        } else if (temp_timer >= 800) {
+            __disable_irq(); 
             float temp = DS18B20_ReadT(); 
-            if (temp > 5.0 && temp < 80.0 && temp != 85.0) 
-            {
-                int temp_int = (int)temp;                  
-                int temp_frac = (int)(temp * 10) % 10;     
+            __enable_irq();  
+            
+            if (temp > 1.0 && temp < 70.0 && temp != 85.0) {
+                if (Global_Temp == -100.0) {
+                    Global_Temp = temp; 
+                } else {
+                    if (temp - Global_Temp < 15.0 && Global_Temp - temp < 15.0) {
+                        Global_Temp = (Global_Temp * 0.7) + (temp * 0.3); 
+                    }
+                }
                 
+                int temp_int = (int)Global_Temp;                  
+                int temp_frac = (int)(Global_Temp * 10) % 10;     
+                
+                OLED_ShowString(3, 1, "Temp:           "); 
+                OLED_ShowString(3, 1, "Temp: ");
                 OLED_ShowNum(3, 7, temp_int, 2);
                 OLED_ShowChar(3, 9, '.');
                 OLED_ShowNum(3, 10, temp_frac, 1);
@@ -113,134 +115,106 @@ int main(void)
         }
 
         // --------------------------------------------------
-        // 火灾检测
+        // MQTT 发送
         // --------------------------------------------------
-        uint8_t fire_pos = Flame_GetPosition(); 
-        
-        if (fire_pos != 0) 
+        if (mqtt_timer >= 5000 && Global_Temp != -100.0) 
         {
-            Current_State = STATE_FIRE;   
-            fire_missing_cnt = 0;         
-            last_fire_pos = fire_pos;     
-        } 
-        else 
-        {
-            if (Current_State == STATE_FIRE) 
-            {
-                fire_missing_cnt++; 
-                if (fire_missing_cnt > 50) 
-                {
-                    Current_State = STATE_PATROL; 
-                    fire_missing_cnt = 0;
-                }
-            } 
-            else 
-            {
-                Current_State = STATE_PATROL; 
-            }
+            char simple_msg[20];
+            int t_int = (int)Global_Temp;
+            int t_frac = (int)(Global_Temp * 10) % 10;
+            sprintf(simple_msg, "%d.%d\n", t_int, t_frac);
+            ESP8266_SendString(simple_msg); 
+            mqtt_timer = 0; 
         }
 
         // --------------------------------------------------
-        // 状态分支执行
+        // 火灾检测
         // --------------------------------------------------
-        if (Current_State == STATE_PATROL)
+        uint8_t fire_pos = Flame_GetPosition(); 
+        if (fire_pos != 0) { Current_State = STATE_FIRE; fire_missing_cnt = 0; last_fire_pos = fire_pos; } 
+        else {
+            if (Current_State == STATE_FIRE) { fire_missing_cnt++; if (fire_missing_cnt > 50) { Current_State = STATE_PATROL; fire_missing_cnt = 0; } } 
+            else { Current_State = STATE_PATROL; }
+        }
+
+        // --------------------------------------------------
+        // 走位调度与防卡死
+        // --------------------------------------------------
+        if (Current_State == STATE_PATROL) 
         {
-            Buzzer_OFF(); 
-            Pump_Close(); 
-            LED1_ON();    
-            LED2_OFF();   
-            
+            Buzzer_OFF(); Pump_Close(); LED1_ON(); LED2_OFF();   
             OLED_ShowString(1, 1, "Mode: Patrol   ");
             
-            Servo_SetAngle(90); 
-            Delay_ms(20);       
-            dist_front = HCSR04_GetDistance();
+            Servo_SetAngle(90); Delay_ms(20);       
+            dist_front = Get_Filtered_Distance();
+            ir_left = IRSensor_GetLeft(); ir_right = IRSensor_GetRight(); 
             
-            ir_left = IRSensor_GetLeft();   
-            ir_right = IRSensor_GetRight(); 
+            OLED_ShowString(2, 1, "D:     L:  R: ");
+            if (dist_front == 999) OLED_ShowString(2, 3, "MAX");
+            else OLED_ShowNum(2, 3, dist_front, 3); 
+            OLED_ShowNum(2, 10, ir_left, 1);
+            OLED_ShowNum(2, 14, ir_right, 1);
             
-            OLED_ShowString(2, 1, "Dist:     cm");
-            OLED_ShowNum(2, 7, dist_front, 3); 
-            
-            if (dist_front > DIST_SAFE && ir_left == 0 && ir_right == 0) {
+            // 距离充裕：全速前进，清空卡死记忆！
+            if (dist_front > DIST_SAFE && ir_left == 0 && ir_right == 0) { 
                 Motor_SmoothSpeed(500, 500); 
-            } else if (dist_front > DIST_WARN && dist_front <= DIST_SAFE && ir_left == 0 && ir_right == 0) {
+                stuck_cnt = 0; // 只要能顺利往前走，说明没卡住
+            } 
+            // 距离靠近：减速慢行，也算安全状态
+            else if (dist_front > DIST_WARN && dist_front <= DIST_SAFE && ir_left == 0 && ir_right == 0) { 
                 Motor_SmoothSpeed(300, 300); 
-            } else {
-                Motor_SmoothSpeed(0, 0);    
-                Delay_ms(200); 
+                stuck_cnt = 0;
+            } 
+            // 🚨 遇到障碍物：触发避障逻辑
+            else {
+                Motor_SmoothSpeed(0, 0); Delay_ms(200); 
                 
-                Servo_SetAngle(20);
-                Delay_ms(400); 
-                dist_right = HCSR04_GetDistance();
+                stuck_cnt++; // 撞墙计数器 +1
                 
-                Servo_SetAngle(160);
-                Delay_ms(400); 
-                dist_left = HCSR04_GetDistance();
-                
-                Servo_SetAngle(90);
-                Delay_ms(400);
-                
-                if (ir_right == 1 && dist_right <= dist_left) {
-                    Motor_SmoothSpeed(-350, -350); 
-                    Delay_ms(400); 
-                    Motor_SmoothSpeed(-550, 550);  
-                    Delay_ms(350); 
-                } else if (ir_left == 1 && dist_right >= dist_left) {
-                    Motor_SmoothSpeed(-350, -350); 
-                    Delay_ms(400);  
-                    Motor_SmoothSpeed(550, -550);  
-                    Delay_ms(350); 
-                } else if (dist_right >= dist_left || ir_left == 1) {
-                    Motor_SmoothSpeed(-350, -350); 
-                    Delay_ms(400);               
-                    Motor_SmoothSpeed(550, -550);  
-                    Delay_ms(350);              
-                } else if (dist_right < dist_left || ir_right == 1) {
-                    Motor_SmoothSpeed(-350, -350); 
-                    Delay_ms(400);  
-                    Motor_SmoothSpeed(-550, 550);  
-                    Delay_ms(350);               
+                // 🌟 暴躁老哥机制：如果连续3次避障都没走出去，说明在左右横跳死循环！
+                if (stuck_cnt >= 3) {
+                    OLED_ShowString(1, 1, "Mode: ESCAPE!  ");
+                    
+                    Motor_SmoothSpeed(-400, -400); Delay_ms(600); // 1. 猛退拉开距离
+                    Motor_SmoothSpeed(500, -500); Delay_ms(800);  // 2. 原地大风车（强行转掉 180 度！）
+                    
+                    stuck_cnt = 0; // 突围成功，重置计数器
+                    
+                    temp_timer += 1600; mqtt_timer += 1600; 
+                } 
+                // 常规避障微操
+                else {
+                    Servo_SetAngle(45); Delay_ms(300); dist_right = Get_Filtered_Distance();
+                    Servo_SetAngle(135); Delay_ms(300); dist_left = Get_Filtered_Distance();
+                    Servo_SetAngle(90); Delay_ms(300);
+                    
+                    if (ir_right == 1 || dist_right <= dist_left) { 
+                        Motor_SmoothSpeed(-400, -400); Delay_ms(400); 
+                        Motor_SmoothSpeed(-450, 450); Delay_ms(250);  // 微操左转
+                    } 
+                    else if (ir_left == 1 || dist_right > dist_left) { 
+                        Motor_SmoothSpeed(-400, -400); Delay_ms(400); 
+                        Motor_SmoothSpeed(450, -450); Delay_ms(250);  // 微操右转
+                    } 
+                    temp_timer += 1750; mqtt_timer += 1750; 
                 }
-                
-                temp_timer += 2150; 
             }
         }
-        else if (Current_State == STATE_FIRE)
+        else if (Current_State == STATE_FIRE) 
         {
-            LED1_OFF();  
-            LED2_ON();   
-            Buzzer_ON(); 
-            
+            LED1_OFF(); LED2_ON(); Buzzer_ON(); 
             OLED_ShowString(1, 1, "Mode: FIRE!    ");
-            OLED_ShowString(2, 1, "Pos:  Exting...");
-            OLED_ShowNum(2, 6, last_fire_pos, 1); 
+            OLED_ShowString(2, 1, "Extinguishing."); 
             
-            // 🌟 防过冲调校：大幅降低了 fire_pos 为 2 和 4 时的微调转速
-            if (fire_pos == 1) {
-                Motor_SmoothSpeed(-350, 300);  // 极左大转
-                Pump_Close(); 
-            } else if (fire_pos == 2) {
-                Motor_SmoothSpeed(-250, 200);  // 🌟 偏左小微调，动作更轻柔
-                Pump_Close(); 
-            } else if (fire_pos == 5) {
-                Motor_SmoothSpeed(350, -300);  // 极右大转
-                Pump_Close();
-            } else if (fire_pos == 4) {
-                Motor_SmoothSpeed(250, -200);  // 🌟 偏右小微调，动作更轻柔
-                Pump_Close();
-            } else if (fire_pos == 3) {
-                Motor_SmoothSpeed(0, 0);       // 正中锁定，停车喷水
-                Pump_Open();             
-            } else if (fire_pos == 0) {
-                Motor_SmoothSpeed(0, 0); 
-            }
+            if (fire_pos == 1) { Motor_SmoothSpeed(-450, 450); Pump_Close(); } 
+            else if (fire_pos == 2) { Motor_SmoothSpeed(-270, 200); Pump_Close(); } 
+            else if (fire_pos == 5) { Motor_SmoothSpeed(450, -450); Pump_Close(); } 
+            else if (fire_pos == 4) { Motor_SmoothSpeed(270, -200); Pump_Close(); } 
+            else if (fire_pos == 3) { Motor_SmoothSpeed(0, 0); Pump_Open(); } 
+            else if (fire_pos == 0) { Motor_SmoothSpeed(0, 0); }
             
-            Delay_ms(50); 
-            temp_timer += 50; 
+            Delay_ms(50); temp_timer += 50; mqtt_timer += 50; 
         }
-        
-        Delay_ms(20); 
-        temp_timer += 20; 
+        Delay_ms(20); temp_timer += 20; mqtt_timer += 20; 
     }
 }
